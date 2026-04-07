@@ -39,6 +39,14 @@
         }
       ],
       "realmRoles": ["default-roles-mcp-registry"]
+    },
+    {
+      "username": "service-account-mcp-hub",
+      "enabled": true,
+      "serviceAccountClientId": "mcp-hub",
+      "clientRoles": {
+        "realm-management": ["manage-clients"]
+      }
     }
   ]
 }

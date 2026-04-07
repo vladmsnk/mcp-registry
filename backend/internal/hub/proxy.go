@@ -184,7 +184,7 @@ type remoteTool struct {
 
 // CallRemoteTool connects to a registered MCP server and calls a tool on it.
 func CallRemoteTool(ctx context.Context, servers ServerRepo, exchanger TokenExchanger, serverID int64, toolName string, arguments json.RawMessage) (json.RawMessage, error) {
-	endpoint, name, active, err := servers.GetEndpoint(ctx, serverID)
+	endpoint, name, keycloakClientID, active, err := servers.GetEndpoint(ctx, serverID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup server: %w", err)
 	}
@@ -194,12 +194,12 @@ func CallRemoteTool(ctx context.Context, servers ServerRepo, exchanger TokenExch
 
 	// Exchange user token for a downstream service token.
 	var bearerToken string
-	if exchanger != nil {
+	if exchanger != nil && keycloakClientID != "" {
 		userToken := auth.TokenFromContext(ctx)
 		if userToken != "" {
-			exchanged, err := exchanger.Exchange(ctx, userToken, name)
+			exchanged, err := exchanger.Exchange(ctx, userToken, keycloakClientID)
 			if err != nil {
-				log.Printf("hub: token exchange for %q failed: %v", name, err)
+				log.Printf("hub: token exchange for %q (audience=%s) failed: %v", name, keycloakClientID, err)
 			} else {
 				bearerToken = exchanged
 			}

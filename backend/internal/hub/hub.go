@@ -12,7 +12,7 @@ import (
 
 // ServerRepo is the interface the hub needs for server lookups.
 type ServerRepo interface {
-	GetEndpoint(ctx context.Context, serverID int64) (endpoint, name string, active bool, err error)
+	GetEndpoint(ctx context.Context, serverID int64) (endpoint, name, keycloakClientID string, active bool, err error)
 }
 
 // ToolRepo is the interface the hub needs for tool search and storage.

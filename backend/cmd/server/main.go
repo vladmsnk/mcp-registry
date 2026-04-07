@@ -11,6 +11,7 @@ import (
 	"mcp-registry/internal/config"
 	"mcp-registry/internal/embedding"
 	"mcp-registry/internal/hub"
+	"mcp-registry/internal/keycloak"
 	"mcp-registry/internal/repository"
 	transport "mcp-registry/internal/transport/http"
 	"mcp-registry/internal/usecase"
@@ -32,7 +33,14 @@ func main() {
 
 	serverRepo := repository.NewServerRepository(db)
 	toolRepo := repository.NewToolRepository(db)
-	uc := usecase.NewServerUsecase(serverRepo)
+
+	var provisioner usecase.ClientProvisioner
+	if cfg.AuthEnabled {
+		provisioner = keycloak.NewAdminClient(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.OIDCClientID, cfg.OIDCClientSecret)
+		log.Println("keycloak client auto-provisioning enabled")
+	}
+
+	uc := usecase.NewServerUsecase(serverRepo, provisioner)
 
 	var embedder hub.Embedder
 	embedder, err = embedding.New(cfg.EmbeddingProvider, cfg.EmbeddingURL, cfg.EmbeddingAPIKey, cfg.EmbeddingModel, cfg.EmbeddingDims)
@@ -68,7 +76,7 @@ func main() {
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
 		if r.Method == http.MethodOptions {

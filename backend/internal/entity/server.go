@@ -12,4 +12,7 @@ type Server struct {
 	Tags        []string  `json:"tags"`
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"createdAt"`
+
+	KeycloakClientID   string `json:"keycloakClientId,omitempty"`
+	KeycloakInternalID string `json:"-"`
 }

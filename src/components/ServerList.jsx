@@ -2,10 +2,11 @@ import { useState, useMemo } from 'react';
 import { Button } from './Button';
 import { SearchBar } from './SearchBar';
 import { FilterChips } from './FilterChips';
+import { AuthBadge } from './AuthBadge';
 import { StatusBadge } from './StatusBadge';
 import { TagBadge } from './TagBadge';
 
-export function ServerList({ servers, onNavigateRegister }) {
+export function ServerList({ servers, onNavigateRegister, onSelectServer }) {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('All');
 
@@ -57,17 +58,21 @@ export function ServerList({ servers, onNavigateRegister }) {
                 <th>Name</th>
                 <th>Endpoint</th>
                 <th>Status</th>
+                <th>Auth</th>
                 <th>Owner</th>
                 <th>Tags</th>
               </tr>
             </thead>
             <tbody>
               {filtered.map((server) => (
-                <tr key={server.id}>
+                <tr key={server.id} className="table-row-clickable" onClick={() => onSelectServer(server)}>
                   <td className="cell-name">{server.name}</td>
                   <td className="cell-url">{server.endpoint}</td>
                   <td>
                     <StatusBadge active={server.active} />
+                  </td>
+                  <td>
+                    <AuthBadge keycloakClientId={server.keycloakClientId} />
                   </td>
                   <td className="cell-owner">{server.owner}</td>
                   <td className="cell-tags">
@@ -79,7 +84,7 @@ export function ServerList({ servers, onNavigateRegister }) {
               ))}
               {filtered.length === 0 && (
                 <tr>
-                  <td colSpan="5" style={{ textAlign: 'center', color: '#9CA3AF', padding: '40px 24px' }}>
+                  <td colSpan="6" style={{ textAlign: 'center', color: '#9CA3AF', padding: '40px 24px' }}>
                     No servers found.
                   </td>
                 </tr>
@@ -95,7 +100,7 @@ export function ServerList({ servers, onNavigateRegister }) {
         {/* Mobile card layout */}
         <div className="mobile-cards">
           {filtered.map((server) => (
-            <div key={server.id} className="mobile-card">
+            <div key={server.id} className="mobile-card mobile-card-clickable" onClick={() => onSelectServer(server)}>
               <div className="mobile-card-header">
                 <span className="mobile-card-name">{server.name}</span>
                 <StatusBadge active={server.active} />
@@ -103,6 +108,12 @@ export function ServerList({ servers, onNavigateRegister }) {
               <div className="mobile-card-row">
                 <span className="mobile-card-label">URL</span>
                 <span className="mobile-card-value cell-url">{server.endpoint}</span>
+              </div>
+              <div className="mobile-card-row">
+                <span className="mobile-card-label">Auth</span>
+                <span className="mobile-card-value">
+                  <AuthBadge keycloakClientId={server.keycloakClientId} />
+                </span>
               </div>
               <div className="mobile-card-row">
                 <span className="mobile-card-label">Owner</span>

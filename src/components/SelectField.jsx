@@ -1,4 +1,4 @@
-export function SelectField({ label, value, onChange, options }) {
+export function SelectField({ label, value, onChange, options, hint }) {
   return (
     <div className="form-field">
       <label className="form-label">{label}</label>
@@ -16,6 +16,7 @@ export function SelectField({ label, value, onChange, options }) {
           <path d="M4 6L8 10L12 6" stroke="#9CA3AF" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </div>
+      {hint && <span className="form-hint">{hint}</span>}
     </div>
   );
 }

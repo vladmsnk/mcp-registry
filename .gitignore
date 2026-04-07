@@ -17,6 +17,12 @@ dist-ssr
 
 # Binaries
 bin/
+backend/server
+
+# Generated
+.playwright-mcp/
+presentation.html
+explain.md
 
 # Editor directories and files
 .vscode/*

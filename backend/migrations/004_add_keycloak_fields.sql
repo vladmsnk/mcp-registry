@@ -1,0 +1,3 @@
+ALTER TABLE servers
+    ADD COLUMN IF NOT EXISTS keycloak_client_id TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS keycloak_internal_id TEXT NOT NULL DEFAULT '';

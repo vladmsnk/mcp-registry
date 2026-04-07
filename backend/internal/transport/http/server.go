@@ -25,6 +25,7 @@ func NewHandler(uc *usecase.ServerUsecase, servers hub.ServerRepo, tools hub.Too
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/servers", h.list)
 	mux.HandleFunc("POST /api/servers", h.register)
+	mux.HandleFunc("DELETE /api/servers/{id}", h.delete)
 	mux.HandleFunc("POST /api/servers/{id}/sync", h.syncTools)
 }
 
@@ -76,6 +77,21 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("write response: %v", err)
 	}
+}
+
+func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
+	serverID, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid server id")
+		return
+	}
+
+	if err := h.uc.Delete(r.Context(), serverID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (h *Handler) syncTools(w http.ResponseWriter, r *http.Request) {

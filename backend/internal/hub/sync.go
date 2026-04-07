@@ -12,7 +12,7 @@ import (
 
 // SyncServerTools connects to a registered MCP server, lists its tools, and caches them in the DB.
 func SyncServerTools(ctx context.Context, servers ServerRepo, tools ToolRepo, embedder Embedder, serverID int64) (int, error) {
-	endpoint, name, active, err := servers.GetEndpoint(ctx, serverID)
+	endpoint, name, _, active, err := servers.GetEndpoint(ctx, serverID)
 	if err != nil {
 		return 0, fmt.Errorf("lookup server: %w", err)
 	}
