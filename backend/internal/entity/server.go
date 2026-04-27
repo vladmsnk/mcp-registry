@@ -13,6 +13,8 @@ type Server struct {
 	Active      bool      `json:"active"`
 	CreatedAt   time.Time `json:"createdAt"`
 
-	KeycloakClientID   string `json:"keycloakClientId,omitempty"`
-	KeycloakInternalID string `json:"-"`
+	KeycloakClientID    string     `json:"keycloakClientId,omitempty"`
+	KeycloakInternalID  string     `json:"-"`
+	TLSCertSHA256       string     `json:"tlsCertSha256,omitempty"`
+	TLSCertCapturedAt   *time.Time `json:"tlsCertCapturedAt,omitempty"`
 }

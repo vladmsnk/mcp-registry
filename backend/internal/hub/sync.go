@@ -8,11 +8,14 @@ import (
 
 	"mcp-registry/internal/embedding"
 	"mcp-registry/internal/entity"
+	"mcp-registry/internal/security"
 )
 
 // SyncServerTools connects to a registered MCP server, lists its tools, and caches them in the DB.
-func SyncServerTools(ctx context.Context, servers ServerRepo, tools ToolRepo, embedder Embedder, serverID int64) (int, error) {
-	endpoint, name, _, active, err := servers.GetEndpoint(ctx, serverID)
+// Uses the same TLS/pin verification as user-driven calls (sync is admin-triggered but still
+// shouldn't trust untrusted endpoints).
+func SyncServerTools(ctx context.Context, servers ServerRepo, tools ToolRepo, embedder Embedder, httpOpts security.ClientOptions, serverID int64) (int, error) {
+	endpoint, name, _, tlsCertSHA256, active, err := servers.GetEndpoint(ctx, serverID)
 	if err != nil {
 		return 0, fmt.Errorf("lookup server: %w", err)
 	}
@@ -20,7 +23,8 @@ func SyncServerTools(ctx context.Context, servers ServerRepo, tools ToolRepo, em
 		return 0, fmt.Errorf("server %q is not active", name)
 	}
 
-	sess := newMCPSession(endpoint, "")
+	client := buildClient(httpOpts, tlsCertSHA256)
+	sess := newMCPSession(endpoint, "", client)
 	if err := sess.initialize(ctx); err != nil {
 		return 0, fmt.Errorf("initialize %q: %w", name, err)
 	}

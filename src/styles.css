@@ -19,6 +19,50 @@ body {
   min-height: 100vh;
 }
 
+/* User Header */
+.user-header {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding: 12px 48px;
+  gap: 16px;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E5E7EB;
+}
+
+.user-name {
+  font-size: 14px;
+  font-weight: 500;
+  color: #374151;
+}
+
+.btn-small {
+  padding: 6px 16px;
+  font-size: 13px;
+  text-decoration: none;
+}
+
+/* Login Screen */
+.login-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 16px;
+}
+
+.login-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.login-subtitle {
+  font-size: 14px;
+  color: #6B7280;
+}
+
 /* Screen Layout */
 .screen {
   display: flex;

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 
 	"mcp-registry/internal/auth"
+	"mcp-registry/internal/security"
 )
 
 const (
@@ -25,17 +27,56 @@ const (
 	notifyInitialized = "notifications/initialized"
 )
 
+// ErrPermissionDenied is the sentinel returned by CallRemoteTool when the
+// caller lacks the tool's required roles. The detail-rich PermissionDeniedError
+// wraps it with the required/caller roles so the audit log can record exactly
+// which intersection failed (P2.9).
+var ErrPermissionDenied = errors.New("permission denied: missing required role for tool")
+
+// PermissionDeniedError carries the data we want in the audit event for an
+// RBAC denial: tool, server, the union of required roles, and the caller's
+// roles. Use errors.Is(err, ErrPermissionDenied) for the categorical check
+// and errors.As(err, &pdErr) to pull out the metadata.
+type PermissionDeniedError struct {
+	ServerID      int64
+	ToolName      string
+	RequiredRoles []string
+	CallerRoles   []string
+}
+
+func (e *PermissionDeniedError) Error() string {
+	return ErrPermissionDenied.Error()
+}
+
+func (e *PermissionDeniedError) Unwrap() error { return ErrPermissionDenied }
+
 var reqID atomic.Int64
+
+// dpopAttacher attaches a DPoP proof + Authorization header to a request. nil
+// means "no DPoP binding for this session" (legacy bearer flow).
+type dpopAttacher interface {
+	AttachToRequest(r *http.Request, accessToken string) error
+}
 
 // mcpSession holds the state for a single MCP connection to a downstream server.
 type mcpSession struct {
 	endpoint    string
 	sessionID   string
 	bearerToken string
+	httpClient  *http.Client
+	dpop        dpopAttacher
 }
 
-func newMCPSession(endpoint, bearerToken string) *mcpSession {
-	return &mcpSession{endpoint: endpoint, bearerToken: bearerToken}
+func newMCPSession(endpoint, bearerToken string, httpClient *http.Client) *mcpSession {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	return &mcpSession{endpoint: endpoint, bearerToken: bearerToken, httpClient: httpClient}
+}
+
+func (s *mcpSession) withDPoP(d dpopAttacher) *mcpSession {
+	s.dpop = d
+	return s
 }
 
 func (s *mcpSession) initialize(ctx context.Context) error {
@@ -136,11 +177,18 @@ func (s *mcpSession) post(ctx context.Context, req rpcRequest) (*http.Response, 
 	if s.sessionID != "" {
 		httpReq.Header.Set("Mcp-Session-Id", s.sessionID)
 	}
-	if s.bearerToken != "" {
+	switch {
+	case s.dpop != nil:
+		// DPoP rewrites the Authorization scheme from Bearer → DPoP and adds
+		// a fresh proof JWT covering this exact request URL+method.
+		if err := s.dpop.AttachToRequest(httpReq, s.bearerToken); err != nil {
+			return nil, err
+		}
+	case s.bearerToken != "":
 		httpReq.Header.Set("Authorization", "Bearer "+s.bearerToken)
 	}
 
-	return http.DefaultClient.Do(httpReq)
+	return s.httpClient.Do(httpReq)
 }
 
 // decodeRPCResponse reads and parses a JSON-RPC response, returning the result.
@@ -182,9 +230,23 @@ type remoteTool struct {
 	InputSchema any    `json:"inputSchema"`
 }
 
+// buildClient combines the hub's base options with a per-server pin (may be empty).
+func buildClient(opts security.ClientOptions, pin string) *http.Client {
+	merged := opts
+	merged.PinSHA256 = pin
+	return security.NewClient(merged)
+}
+
 // CallRemoteTool connects to a registered MCP server and calls a tool on it.
-func CallRemoteTool(ctx context.Context, servers ServerRepo, exchanger TokenExchanger, serverID int64, toolName string, arguments json.RawMessage) (json.RawMessage, error) {
-	endpoint, name, keycloakClientID, active, err := servers.GetEndpoint(ctx, serverID)
+// When the caller has validated JWT claims in ctx, the tool's required_roles are enforced —
+// callers without overlapping roles get ErrPermissionDenied. Tools with empty required_roles
+// are unrestricted. When no claims are present (auth disabled), no role check is performed.
+//
+// The httpOpts are merged with the server's pinned fingerprint to build a TLS-verifying
+// client for this call. When dpopSigner is non-nil the outbound request uses the DPoP
+// scheme instead of plain Bearer (P1.7).
+func CallRemoteTool(ctx context.Context, servers ServerRepo, tools ToolRepo, exchanger TokenExchanger, httpOpts security.ClientOptions, serverID int64, toolName string, arguments json.RawMessage, dpopSigner dpopAttacher) (json.RawMessage, error) {
+	endpoint, name, keycloakClientID, tlsCertSHA256, active, err := servers.GetEndpoint(ctx, serverID)
 	if err != nil {
 		return nil, fmt.Errorf("lookup server: %w", err)
 	}
@@ -192,13 +254,49 @@ func CallRemoteTool(ctx context.Context, servers ServerRepo, exchanger TokenExch
 		return nil, fmt.Errorf("server %q is not active", name)
 	}
 
-	// Exchange user token for a downstream service token.
+	// Tool-level RBAC: deny if caller has claims but lacks any required role.
+	if claims := auth.ClaimsFromContext(ctx); claims != nil && tools != nil {
+		required, rolesErr := tools.GetRequiredRoles(ctx, serverID, toolName)
+		if rolesErr != nil {
+			return nil, fmt.Errorf("lookup tool roles: %w", rolesErr)
+		}
+		if !auth.HasAnyRole(claims, required) {
+			return nil, &PermissionDeniedError{
+				ServerID:      serverID,
+				ToolName:      toolName,
+				RequiredRoles: required,
+				CallerRoles:   claims.RealmRoles,
+			}
+		}
+	}
+
+	// Exchange user token for a downstream service token. Audience binding (P1.6):
+	// the exchanger validates the audience format and re-checks the role overlap
+	// against the union of required_roles for tools on this server.
 	var bearerToken string
 	if exchanger != nil && keycloakClientID != "" {
 		userToken := auth.TokenFromContext(ctx)
 		if userToken != "" {
-			exchanged, err := exchanger.Exchange(ctx, userToken, keycloakClientID)
+			serverRoles, rolesErr := tools.GetServerRequiredRoles(ctx, serverID)
+			if rolesErr != nil {
+				return nil, fmt.Errorf("lookup server roles: %w", rolesErr)
+			}
+			claims := auth.ClaimsFromContext(ctx)
+			req := auth.ExchangeRequest{
+				SubjectToken:  userToken,
+				Audience:      keycloakClientID,
+				RequiredRoles: serverRoles,
+			}
+			if claims != nil {
+				req.UserRoles = claims.RealmRoles
+				req.ActorSub = claims.Subject
+				req.ActorUsername = claims.PreferredUsername
+			}
+			exchanged, err := exchanger.Exchange(ctx, req)
 			if err != nil {
+				if errors.Is(err, auth.ErrAudienceNotAllowed) || errors.Is(err, auth.ErrInsufficientRoles) {
+					return nil, fmt.Errorf("token exchange denied: %w", err)
+				}
 				log.Printf("hub: token exchange for %q (audience=%s) failed: %v", name, keycloakClientID, err)
 			} else {
 				bearerToken = exchanged
@@ -206,7 +304,11 @@ func CallRemoteTool(ctx context.Context, servers ServerRepo, exchanger TokenExch
 		}
 	}
 
-	sess := newMCPSession(endpoint, bearerToken)
+	client := buildClient(httpOpts, tlsCertSHA256)
+	sess := newMCPSession(endpoint, bearerToken, client)
+	if dpopSigner != nil && bearerToken != "" {
+		sess.withDPoP(dpopSigner)
+	}
 	if err := sess.initialize(ctx); err != nil {
 		return nil, fmt.Errorf("initialize %q: %w", name, err)
 	}

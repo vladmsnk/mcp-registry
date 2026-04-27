@@ -7,11 +7,16 @@ import (
 
 	_ "github.com/lib/pq"
 
+	"mcp-registry/internal/audit"
 	"mcp-registry/internal/auth"
 	"mcp-registry/internal/config"
+	"mcp-registry/internal/dpop"
 	"mcp-registry/internal/embedding"
+	"mcp-registry/internal/health"
 	"mcp-registry/internal/hub"
+	"mcp-registry/internal/ratelimit"
 	"mcp-registry/internal/repository"
+	"mcp-registry/internal/security"
 )
 
 func main() {
@@ -30,6 +35,7 @@ func main() {
 
 	serverRepo := repository.NewServerRepository(db)
 	toolRepo := repository.NewToolRepository(db)
+	auditLog := audit.NewLogger(audit.NewRepository(db))
 
 	// Embedding.
 	var embedder hub.Embedder
@@ -41,14 +47,63 @@ func main() {
 		log.Printf("hub: embedding enabled (provider=%s, model=%s, dims=%d)", cfg.EmbeddingProvider, cfg.EmbeddingModel, cfg.EmbeddingDims)
 	}
 
+	// DPoP signer (P1.7). When enabled, exchanged tokens are bound to the
+	// hub's keypair and every downstream call carries a fresh DPoP proof.
+	var dpopSigner *dpop.Signer
+	if cfg.DPoPEnabled {
+		s, err := dpop.LoadOrGenerate(cfg.DPoPKeyPath)
+		if err != nil {
+			log.Fatalf("hub: load dpop key: %v", err)
+		}
+		dpopSigner = s
+		log.Printf("hub: DPoP enabled (jkt=%s)", s.JKT())
+	}
+
 	// Token Exchange.
 	var exchanger hub.TokenExchanger
 	if cfg.AuthEnabled {
-		exchanger = auth.NewTokenExchanger(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.OIDCClientID, cfg.OIDCClientSecret)
+		if cfg.OIDCClientSecret == "" || cfg.OIDCClientSecret == "mcp-hub-secret" {
+			log.Fatal("hub: OIDC_CLIENT_SECRET must be set to a real value when AUTH_ENABLED=true")
+		}
+		te := auth.NewTokenExchanger(cfg.KeycloakURL, cfg.KeycloakRealm, cfg.OIDCClientID, cfg.OIDCClientSecret, auditLog)
+		if dpopSigner != nil {
+			te = te.WithDPoP(dpopSigner)
+		}
+		exchanger = te
 		log.Println("hub: token exchange enabled")
 	}
 
-	h := hub.New(serverRepo, toolRepo, embedder, exchanger)
+	httpOpts := security.ClientOptions{
+		BlockPrivateIPs: cfg.MCPBlockPrivateIPs,
+		EgressAllowlist: cfg.MCPEgressAllowlist,
+	}
+	if !cfg.MCPRequireHTTPS && !cfg.MCPBlockPrivateIPs && len(cfg.MCPAllowedHosts) == 0 {
+		log.Println("hub: WARNING: insecure MCP defaults — set MCP_REQUIRE_HTTPS=true and MCP_BLOCK_PRIVATE_IPS=true for production")
+	}
+
+	limiter := ratelimit.New(ratelimit.Config{
+		RPS:   cfg.MCPPerServerRPS,
+		Burst: cfg.MCPPerServerBurst,
+	})
+	defer limiter.Stop()
+
+	healthRepo := health.NewRepository(db)
+	healthGate := health.NewGate(healthRepo, cfg.HealthFailureThreshold)
+
+	deps := hub.Deps{
+		Servers:     serverRepo,
+		Tools:       toolRepo,
+		Embedder:    embedder,
+		Exchanger:   exchanger,
+		AuditLog:    auditLog,
+		HTTPOpts:    httpOpts,
+		RateLimiter: limiter,
+		HealthGate:  healthGate,
+	}
+	if dpopSigner != nil {
+		deps.DPoPSigner = dpopSigner
+	}
+	h := hub.NewFromDeps(deps)
 
 	// Build handler chain.
 	var handler http.Handler = h

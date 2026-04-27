@@ -2,9 +2,9 @@ services:
   postgres:
     image: pgvector/pgvector:pg17
     environment:
-      POSTGRES_DB: mcp_registry
-      POSTGRES_USER: mcp
-      POSTGRES_PASSWORD: mcp_secret
+      POSTGRES_DB: ${DB_NAME:-mcp_registry}
+      POSTGRES_USER: ${DB_USER:-mcp}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required — see .env.example}
     ports:
       - "6521:5432"
     volumes:
@@ -14,13 +14,20 @@ services:
   keycloak:
     image: quay.io/keycloak/keycloak:26.0
     environment:
-      KC_BOOTSTRAP_ADMIN_USERNAME: admin
-      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_ADMIN_USERNAME:?KC_ADMIN_USERNAME is required — see .env.example}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_ADMIN_PASSWORD:?KC_ADMIN_PASSWORD is required — see .env.example}
+      # Resolved by Keycloak's ${env.X} substitution in realm-export.template.json.
+      MCP_HUB_CLIENT_SECRET: ${MCP_HUB_CLIENT_SECRET:?MCP_HUB_CLIENT_SECRET is required — see .env.example}
+      MCP_HUB_REDIRECT_URI: ${MCP_HUB_REDIRECT_URI:?MCP_HUB_REDIRECT_URI is required — see .env.example}
+      MCP_HUB_WEB_ORIGIN: ${MCP_HUB_WEB_ORIGIN:?MCP_HUB_WEB_ORIGIN is required — see .env.example}
+      MCP_KC_SSL_REQUIRED: ${MCP_KC_SSL_REQUIRED:-none}
+      MCP_TEST_USER_PASSWORD: ${MCP_TEST_USER_PASSWORD:-testpass}
+      MCP_BROWSER_FLOW: ${MCP_BROWSER_FLOW:-browser}
     command: start-dev --import-realm
     ports:
       - "8180:8080"
     volumes:
-      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json
+      - ./keycloak/realm-export.template.json:/opt/keycloak/data/import/realm-export.json:ro
 
 volumes:
   pgdata:

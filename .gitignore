@@ -24,6 +24,12 @@ backend/server
 presentation.html
 explain.md
 
+# Secrets
+.env
+.env.*
+!.env.example
+keycloak/realm-export.json
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

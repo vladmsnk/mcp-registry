@@ -32,6 +32,9 @@ func Middleware(v *Validator) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			token := extractBearerToken(r)
 			if token == "" {
+				token = extractTokenFromCookie(r)
+			}
+			if token == "" {
 				http.Error(w, `{"error":"authentication required"}`, http.StatusUnauthorized)
 				return
 			}
@@ -55,4 +58,12 @@ func extractBearerToken(r *http.Request) string {
 		return strings.TrimPrefix(auth, "Bearer ")
 	}
 	return ""
+}
+
+func extractTokenFromCookie(r *http.Request) string {
+	c, err := r.Cookie("access_token")
+	if err != nil {
+		return ""
+	}
+	return c.Value
 }

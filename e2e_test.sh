@@ -46,7 +46,9 @@ if ! (echo > /dev/tcp/localhost/6521) 2>/dev/null; then
 fi
 pass "PostgreSQL is running"
 
-# Keycloak
+# Keycloak — secret read from env so this script can be run against a freshly-rotated realm.
+: "${MCP_HUB_CLIENT_SECRET:?MCP_HUB_CLIENT_SECRET must be set (export from .env)}"
+: "${MCP_TEST_USER_PASSWORD:=testpass}"
 KC_URL="http://localhost:8180"
 if ! curl -sf "${KC_URL}/realms/mcp-registry/.well-known/openid-configuration" >/dev/null 2>&1; then
     fail "Keycloak not ready" "Run: docker compose up -d  (wait ~30s for startup)"
@@ -76,9 +78,9 @@ TOKEN_RESPONSE=$(curl -sf -X POST \
     -H "Content-Type: application/x-www-form-urlencoded" \
     -d "grant_type=password" \
     -d "client_id=mcp-hub" \
-    -d "client_secret=mcp-hub-secret" \
+    -d "client_secret=${MCP_HUB_CLIENT_SECRET}" \
     -d "username=testuser" \
-    -d "password=testpass" 2>&1) || fail "Token request failed" "$TOKEN_RESPONSE"
+    -d "password=${MCP_TEST_USER_PASSWORD}" 2>&1) || fail "Token request failed" "$TOKEN_RESPONSE"
 
 ACCESS_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.access_token')
 if [ -z "$ACCESS_TOKEN" ] || [ "$ACCESS_TOKEN" = "null" ]; then

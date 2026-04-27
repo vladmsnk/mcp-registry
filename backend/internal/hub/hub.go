@@ -3,23 +3,33 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
+	"time"
 
+	"mcp-registry/internal/audit"
+	"mcp-registry/internal/auth"
 	"mcp-registry/internal/entity"
+	"mcp-registry/internal/security"
 )
 
 // ServerRepo is the interface the hub needs for server lookups.
 type ServerRepo interface {
-	GetEndpoint(ctx context.Context, serverID int64) (endpoint, name, keycloakClientID string, active bool, err error)
+	GetEndpoint(ctx context.Context, serverID int64) (endpoint, name, keycloakClientID, tlsCertSHA256 string, active bool, err error)
 }
 
 // ToolRepo is the interface the hub needs for tool search and storage.
+// userRoles == nil means no role filtering (admin/internal); a non-nil slice (including empty) filters
+// to tools with empty required_roles or overlapping roles.
 type ToolRepo interface {
-	Search(ctx context.Context, query string, limit int) ([]entity.DiscoveredTool, error)
-	SearchByVector(ctx context.Context, queryEmbedding []float32, limit int) ([]entity.DiscoveredTool, error)
+	Search(ctx context.Context, query string, limit int, userRoles []string) ([]entity.DiscoveredTool, error)
+	SearchByVector(ctx context.Context, queryEmbedding []float32, limit int, userRoles []string) ([]entity.DiscoveredTool, error)
 	ReplaceForServer(ctx context.Context, serverID int64, tools []entity.Tool) error
+	GetRequiredRoles(ctx context.Context, serverID int64, toolName string) ([]string, error)
+	GetServerRequiredRoles(ctx context.Context, serverID int64) ([]string, error)
 }
 
 // Embedder generates vector embeddings from text.
@@ -32,20 +42,75 @@ type Embedder interface {
 
 // TokenExchanger exchanges a user token for a service-specific token.
 type TokenExchanger interface {
-	Exchange(ctx context.Context, subjectToken, audience string) (string, error)
+	Exchange(ctx context.Context, req auth.ExchangeRequest) (string, error)
+}
+
+// RateLimiter caps the rate of calls to any one downstream server (P3.13).
+// nil → unlimited.
+type RateLimiter interface {
+	Allow(key string) bool
+}
+
+// HealthGate reports whether a server is currently considered healthy enough
+// to receive traffic. nil → no gate (always allow).
+type HealthGate interface {
+	IsHealthy(ctx context.Context, serverID int64) bool
+}
+
+// DPoPSigner attaches DPoP proofs to outbound requests (P1.7). nil → legacy
+// bearer scheme.
+type DPoPSigner interface {
+	AttachToRequest(r *http.Request, accessToken string) error
 }
 
 // Hub is an MCP server (Streamable HTTP transport) that exposes discover_tools and call_tool.
 type Hub struct {
-	servers   ServerRepo
-	tools     ToolRepo
-	embedder  Embedder
-	exchanger TokenExchanger
+	servers     ServerRepo
+	tools       ToolRepo
+	embedder    Embedder
+	exchanger   TokenExchanger
+	audit       *audit.Logger
+	httpOpts    security.ClientOptions
+	rateLimiter RateLimiter
+	healthGate  HealthGate
+	dpop        DPoPSigner
 }
 
-// New creates a Hub. embedder and exchanger may be nil.
-func New(servers ServerRepo, tools ToolRepo, embedder Embedder, exchanger TokenExchanger) *Hub {
-	return &Hub{servers: servers, tools: tools, embedder: embedder, exchanger: exchanger}
+// Deps groups optional collaborators so callers don't have to manage long
+// constructor argument lists.
+type Deps struct {
+	Servers     ServerRepo
+	Tools       ToolRepo
+	Embedder    Embedder
+	Exchanger   TokenExchanger
+	AuditLog    *audit.Logger
+	HTTPOpts    security.ClientOptions
+	RateLimiter RateLimiter
+	HealthGate  HealthGate
+	DPoPSigner  DPoPSigner
+}
+
+// New creates a Hub. embedder, exchanger, and auditLog may be nil. httpOpts controls
+// the TLS/SSRF behavior for outbound calls; per-server fingerprint pinning is layered
+// on top inside CallRemoteTool.
+func New(servers ServerRepo, tools ToolRepo, embedder Embedder, exchanger TokenExchanger, auditLog *audit.Logger, httpOpts security.ClientOptions) *Hub {
+	return &Hub{servers: servers, tools: tools, embedder: embedder, exchanger: exchanger, audit: auditLog, httpOpts: httpOpts}
+}
+
+// NewFromDeps creates a Hub using the Deps struct. Preferred for new callers
+// since it allows wiring the rate limiter / health gate / DPoP signer.
+func NewFromDeps(d Deps) *Hub {
+	return &Hub{
+		servers:     d.Servers,
+		tools:       d.Tools,
+		embedder:    d.Embedder,
+		exchanger:   d.Exchanger,
+		audit:       d.AuditLog,
+		httpOpts:    d.HTTPOpts,
+		rateLimiter: d.RateLimiter,
+		healthGate:  d.HealthGate,
+		dpop:        d.DPoPSigner,
+	}
 }
 
 // ServeHTTP handles POST /mcp — each request is a JSON-RPC 2.0 message.
@@ -73,7 +138,7 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := h.dispatch(r.Context(), req)
+	resp := h.dispatch(r, req)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -81,14 +146,14 @@ func (h *Hub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Hub) dispatch(ctx context.Context, req rpcRequest) rpcResponse {
+func (h *Hub) dispatch(r *http.Request, req rpcRequest) rpcResponse {
 	switch req.Method {
 	case methodInitialize:
 		return h.handleInitialize(req)
 	case methodToolsList:
 		return h.handleToolsList(req)
 	case methodToolsCall:
-		return h.handleToolsCall(ctx, req)
+		return h.handleToolsCall(r, req)
 	case methodPing:
 		return rpcSuccess(req.ID, map[string]any{})
 	default:
@@ -158,7 +223,7 @@ func (h *Hub) handleToolsList(req rpcRequest) rpcResponse {
 	return rpcSuccess(req.ID, map[string]any{"tools": tools})
 }
 
-func (h *Hub) handleToolsCall(ctx context.Context, req rpcRequest) rpcResponse {
+func (h *Hub) handleToolsCall(r *http.Request, req rpcRequest) rpcResponse {
 	var params struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
@@ -169,15 +234,48 @@ func (h *Hub) handleToolsCall(ctx context.Context, req rpcRequest) rpcResponse {
 
 	switch params.Name {
 	case "discover_tools":
-		return h.execDiscoverTools(ctx, req.ID, params.Arguments)
+		return h.execDiscoverTools(r, req.ID, params.Arguments)
 	case "call_tool":
-		return h.execCallTool(ctx, req.ID, params.Arguments)
+		return h.execCallTool(r, req.ID, params.Arguments)
 	default:
 		return rpcError(req.ID, -32602, "unknown tool: "+params.Name)
 	}
 }
 
-func (h *Hub) execDiscoverTools(ctx context.Context, id *int64, raw json.RawMessage) rpcResponse {
+func (h *Hub) newAuditEvent(r *http.Request, action string, started time.Time) audit.Event {
+	claims := auth.ClaimsFromContext(r.Context())
+	e := audit.Event{
+		Action:    action,
+		IP:        audit.ClientIP(r),
+		UserAgent: r.Header.Get("User-Agent"),
+		RequestID: r.Header.Get("X-Request-ID"),
+		LatencyMS: time.Since(started).Milliseconds(),
+	}
+	if claims != nil {
+		e.ActorSub = claims.Subject
+		e.ActorUsername = claims.PreferredUsername
+		e.ActorRoles = claims.RealmRoles
+	}
+	return e
+}
+
+// rolesForFilter returns the role slice to pass to ToolRepo.
+// nil → no filtering (auth disabled or no claims). Non-nil (possibly empty) → filter by user roles.
+func rolesForFilter(ctx context.Context) []string {
+	claims := auth.ClaimsFromContext(ctx)
+	if claims == nil {
+		return nil
+	}
+	if claims.RealmRoles == nil {
+		return []string{}
+	}
+	return claims.RealmRoles
+}
+
+func (h *Hub) execDiscoverTools(r *http.Request, id *int64, raw json.RawMessage) rpcResponse {
+	started := time.Now()
+	ctx := r.Context()
+
 	var args struct {
 		Query string `json:"query"`
 		Limit int    `json:"limit"`
@@ -186,6 +284,8 @@ func (h *Hub) execDiscoverTools(ctx context.Context, id *int64, raw json.RawMess
 		return rpcError(id, -32602, "invalid arguments for discover_tools")
 	}
 
+	roles := rolesForFilter(ctx)
+
 	var results []entity.DiscoveredTool
 	var err error
 
@@ -193,16 +293,25 @@ func (h *Hub) execDiscoverTools(ctx context.Context, id *int64, raw json.RawMess
 		queryVec, embErr := h.embedder.Embed(ctx, args.Query)
 		if embErr != nil {
 			log.Printf("hub: embedding query failed, falling back to text search: %v", embErr)
-			results, err = h.tools.Search(ctx, args.Query, args.Limit)
+			results, err = h.tools.Search(ctx, args.Query, args.Limit, roles)
 		} else {
-			results, err = h.tools.SearchByVector(ctx, queryVec, args.Limit)
+			results, err = h.tools.SearchByVector(ctx, queryVec, args.Limit, roles)
 		}
 	} else {
-		results, err = h.tools.Search(ctx, args.Query, args.Limit)
+		results, err = h.tools.Search(ctx, args.Query, args.Limit, roles)
 	}
+
+	ev := h.newAuditEvent(r, audit.ActionToolDiscover, started)
+	ev.Metadata = map[string]any{"query": args.Query, "limit": args.Limit}
 	if err != nil {
+		ev.Status = audit.StatusError
+		ev.Error = err.Error()
+		h.audit.Log(ctx, ev)
 		return toolError(id, "search failed: "+err.Error())
 	}
+	ev.Status = audit.StatusAllowed
+	ev.Metadata["result_count"] = len(results)
+	h.audit.Log(ctx, ev)
 
 	text, _ := json.Marshal(results)
 
@@ -216,7 +325,10 @@ func (h *Hub) execDiscoverTools(ctx context.Context, id *int64, raw json.RawMess
 	return toolSuccess(id, string(text)+hint)
 }
 
-func (h *Hub) execCallTool(ctx context.Context, id *int64, raw json.RawMessage) rpcResponse {
+func (h *Hub) execCallTool(r *http.Request, id *int64, raw json.RawMessage) rpcResponse {
+	started := time.Now()
+	ctx := r.Context()
+
 	var args struct {
 		ServerID  int64           `json:"server_id"`
 		ToolName  string          `json:"tool_name"`
@@ -226,10 +338,61 @@ func (h *Hub) execCallTool(ctx context.Context, id *int64, raw json.RawMessage) 
 		return rpcError(id, -32602, "invalid arguments for call_tool")
 	}
 
-	result, err := CallRemoteTool(ctx, h.servers, h.exchanger, args.ServerID, args.ToolName, args.Arguments)
+	// P3.13: refuse outbound calls when a downstream server is over the rate
+	// budget or is currently unhealthy. The audit event below labels the
+	// rejection so SIEM can spot abusive clients vs. failing servers.
+	if h.healthGate != nil && !h.healthGate.IsHealthy(ctx, args.ServerID) {
+		ev := h.newAuditEvent(r, audit.ActionToolCall, started)
+		ev.ServerID = args.ServerID
+		ev.ToolName = args.ToolName
+		ev.Status = audit.StatusDenied
+		ev.Error = "downstream server is unhealthy"
+		ev.Metadata = map[string]any{"denial_reason": "downstream_unhealthy"}
+		h.audit.Log(ctx, ev)
+		return toolError(id, "downstream server is unhealthy")
+	}
+	if h.rateLimiter != nil && !h.rateLimiter.Allow(strconv.FormatInt(args.ServerID, 10)) {
+		ev := h.newAuditEvent(r, audit.ActionToolCall, started)
+		ev.ServerID = args.ServerID
+		ev.ToolName = args.ToolName
+		ev.Status = audit.StatusDenied
+		ev.Error = "per-server rate limit exceeded"
+		ev.Metadata = map[string]any{"denial_reason": "rate_limited"}
+		h.audit.Log(ctx, ev)
+		return toolError(id, "per-server rate limit exceeded")
+	}
+
+	result, err := CallRemoteTool(ctx, h.servers, h.tools, h.exchanger, h.httpOpts, args.ServerID, args.ToolName, args.Arguments, h.dpop)
+
+	ev := h.newAuditEvent(r, audit.ActionToolCall, started)
+	ev.ServerID = args.ServerID
+	ev.ToolName = args.ToolName
+
 	if err != nil {
+		if errors.Is(err, ErrPermissionDenied) {
+			ev.Status = audit.StatusDenied
+			// Pull the role intersection out so SIEM can spot specific
+			// denial patterns (e.g. one user repeatedly probing tools they
+			// can't call) without parsing the error string (P2.9).
+			var pdErr *PermissionDeniedError
+			if errors.As(err, &pdErr) {
+				if ev.Metadata == nil {
+					ev.Metadata = map[string]any{}
+				}
+				ev.Metadata["required_roles"] = pdErr.RequiredRoles
+				ev.Metadata["caller_roles"] = pdErr.CallerRoles
+				ev.Metadata["denial_reason"] = "no_role_overlap"
+			}
+		} else {
+			ev.Status = audit.StatusError
+		}
+		ev.Error = err.Error()
+		h.audit.Log(ctx, ev)
 		return toolError(id, "call_tool failed: "+err.Error())
 	}
+
+	ev.Status = audit.StatusAllowed
+	h.audit.Log(ctx, ev)
 
 	return toolSuccess(id, string(result))
 }

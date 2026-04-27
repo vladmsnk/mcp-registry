@@ -6,12 +6,13 @@ import (
 )
 
 type Tool struct {
-	ID          int64           `json:"id"`
-	ServerID    int64           `json:"serverId"`
-	Name        string          `json:"name"`
-	Description string          `json:"description"`
-	InputSchema json.RawMessage `json:"inputSchema"`
-	CreatedAt   time.Time       `json:"createdAt"`
+	ID            int64           `json:"id"`
+	ServerID      int64           `json:"serverId"`
+	Name          string          `json:"name"`
+	Description   string          `json:"description"`
+	InputSchema   json.RawMessage `json:"inputSchema"`
+	RequiredRoles []string        `json:"requiredRoles"`
+	CreatedAt     time.Time       `json:"createdAt"`
 
 	Embedding      []float32 `json:"-"`
 	EmbeddingText  string    `json:"-"`
@@ -27,4 +28,5 @@ type DiscoveredTool struct {
 	ToolName          string          `json:"tool_name"`
 	ToolDescription   string          `json:"tool_description"`
 	InputSchema       json.RawMessage `json:"input_schema"`
+	RequiredRoles     []string        `json:"required_roles,omitempty"`
 }

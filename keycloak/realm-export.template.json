@@ -1,0 +1,101 @@
+{
+  "realm": "mcp-registry",
+  "enabled": true,
+  "sslRequired": "${env.MCP_KC_SSL_REQUIRED:none}",
+  "registrationAllowed": false,
+  "browserFlow": "${env.MCP_BROWSER_FLOW:browser}",
+  "roles": {
+    "realm": [
+      { "name": "mcp-user", "description": "Read MCP servers and call permitted tools" },
+      { "name": "mcp-admin", "description": "Manage MCP servers, sync, and tool RBAC" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "mcp-hub",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "${env.MCP_HUB_CLIENT_SECRET}",
+      "redirectUris": ["${env.MCP_HUB_REDIRECT_URI}"],
+      "webOrigins": ["${env.MCP_HUB_WEB_ORIGIN}"],
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "authorizationServicesEnabled": false,
+      "standardFlowEnabled": true,
+      "defaultClientScopes": ["openid", "profile", "email", "roles"],
+      "attributes": {
+        "oidc.ciba.grant.enabled": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "client.secret.creation.time": "0",
+        "token.exchange.standard.flow.enabled": "true"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "testuser",
+      "enabled": true,
+      "email": "testuser@example.com",
+      "firstName": "Test",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "${env.MCP_TEST_USER_PASSWORD:testpass}",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["default-roles-mcp-registry", "mcp-user", "mcp-admin"]
+    },
+    {
+      "username": "service-account-mcp-hub",
+      "enabled": true,
+      "serviceAccountClientId": "mcp-hub",
+      "clientRoles": {
+        "realm-management": ["manage-clients"]
+      }
+    }
+  ],
+  "authenticationFlows": [
+    {
+      "alias": "mcp-admin-browser",
+      "description": "Browser flow with conditional OTP for users holding mcp-admin (NHI #11)",
+      "providerId": "basic-flow",
+      "topLevel": true,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "auth-cookie", "requirement": "ALTERNATIVE", "priority": 10, "userSetupAllowed": false, "autheticatorFlow": false },
+        { "authenticator": "identity-provider-redirector", "requirement": "ALTERNATIVE", "priority": 25, "userSetupAllowed": false, "autheticatorFlow": false },
+        { "flowAlias": "mcp-admin-forms", "requirement": "ALTERNATIVE", "priority": 30, "userSetupAllowed": false, "autheticatorFlow": true }
+      ]
+    },
+    {
+      "alias": "mcp-admin-forms",
+      "description": "Username + password followed by conditional OTP",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "auth-username-password-form", "requirement": "REQUIRED", "priority": 10, "userSetupAllowed": false, "autheticatorFlow": false },
+        { "flowAlias": "mcp-admin-conditional-otp", "requirement": "CONDITIONAL", "priority": 20, "userSetupAllowed": false, "autheticatorFlow": true }
+      ]
+    },
+    {
+      "alias": "mcp-admin-conditional-otp",
+      "description": "Force OTP for users with mcp-admin",
+      "providerId": "basic-flow",
+      "topLevel": false,
+      "builtIn": false,
+      "authenticationExecutions": [
+        { "authenticator": "conditional-user-role", "requirement": "REQUIRED", "priority": 10, "userSetupAllowed": false, "autheticatorFlow": false, "authenticatorConfig": "mcp-admin-otp-condition" },
+        { "authenticator": "auth-otp-form", "requirement": "REQUIRED", "priority": 20, "userSetupAllowed": false, "autheticatorFlow": false }
+      ]
+    }
+  ],
+  "authenticatorConfig": [
+    {
+      "alias": "mcp-admin-otp-condition",
+      "config": { "condUserRole": "mcp-admin" }
+    }
+  ]
+}
